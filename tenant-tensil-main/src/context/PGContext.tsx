@@ -54,6 +54,7 @@ interface PGContextType {
   updateExpense: (id: string, data: Partial<Omit<Expense, "id">>) => Promise<void>;
   deleteExpense: (id: string) => Promise<void>;
   markAsPaid: (paymentId: string) => Promise<void>;
+  togglePaymentStatus: (paymentId: string, newStatus: boolean) => Promise<void>;
   getRoomByMemberId: (memberId: string) => Room | undefined;
   getMemberById: (memberId: string) => Member | undefined;
   getPaymentByMemberId: (memberId: string) => Payment | undefined;
@@ -141,13 +142,39 @@ export const PGProvider = ({ children }: { children: ReactNode }) => {
     await supabase.from("rooms").update({ occupied_beds: (rooms.find(r => r.id === member.roomId)?.occupiedBeds || 0) + 1 }).eq("id", member.roomId);
     setRooms(prev => prev.map(r => r.id === member.roomId ? { ...r, occupiedBeds: r.occupiedBeds + 1 } : r));
 
-    // Auto-create payment for current month
-    const totalAmount = member.rentAmount + (member.foodCharges || 0);
+    // Auto-create payments for all already-generated months where member is eligible
+    const totalAmount = member.rentAmount + ((member.foodEnabled ? (member.foodCharges || 0) : 0));
+    const existingMonths = [...new Set(payments.map(p => p.month))];
+    const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    const eligibleMonths = existingMonths.filter(month => {
+      const parts = month.split(" ");
+      const monthIndex = monthNames.indexOf(parts[0]);
+      const lastDay = new Date(parseInt(parts[1]), monthIndex + 1, 0);
+      return new Date(member.joinDate) <= lastDay;
+    });
+    // Also include current month even if not yet generated
     const currentMonth = new Date().toLocaleString("en-US", { month: "long", year: "numeric" });
-    const { data: payData } = await supabase.from("payments").insert({
-      user_id: user.id, member_id: data.id, month: currentMonth, amount: totalAmount, paid: false,
-    }).select().single();
-    if (payData) setPayments(prev => [...prev, { id: payData.id, memberId: payData.member_id, month: payData.month, amount: payData.amount, paid: payData.paid }]);
+    if (!eligibleMonths.includes(currentMonth)) {
+      const parts = currentMonth.split(" ");
+      const monthIndex = monthNames.indexOf(parts[0]);
+      const lastDay = new Date(parseInt(parts[1]), monthIndex + 1, 0);
+      if (new Date(member.joinDate) <= lastDay) {
+        eligibleMonths.push(currentMonth);
+      }
+    }
+    // Filter out months where payment already exists for this member
+    const existingPaymentMonths = new Set(payments.filter(p => p.memberId === data.id).map(p => p.month));
+    const monthsToCreate = eligibleMonths.filter(m => !existingPaymentMonths.has(m));
+    if (monthsToCreate.length > 0) {
+      const newPayments = monthsToCreate.map(m => ({
+        user_id: user.id, member_id: data.id, month: m, amount: totalAmount, paid: false,
+      }));
+      const { data: payData } = await supabase.from("payments").insert(newPayments).select();
+      if (payData) {
+        const mapped = payData.map(p => ({ id: p.id, memberId: p.member_id, month: p.month, amount: p.amount, paid: p.paid }));
+        setPayments(prev => [...prev, ...mapped]);
+      }
+    }
   };
 
   const updateMember = async (id: string, data: Partial<Omit<Member, "id">>) => {
@@ -202,7 +229,13 @@ export const PGProvider = ({ children }: { children: ReactNode }) => {
     if (!user) return { generated: 0, skipped: false };
     const existing = payments.filter(p => p.month === month);
     if (existing.length > 0) return { generated: 0, skipped: true };
-    const newPayments = members.map(m => ({
+    // Only include members whose join_date is on or before the selected month
+    const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    const parts = month.split(" ");
+    const monthIndex = monthNames.indexOf(parts[0]);
+    const lastDay = new Date(parseInt(parts[1]), monthIndex + 1, 0);
+    const eligibleMembers = members.filter(m => new Date(m.joinDate) <= lastDay);
+    const newPayments = eligibleMembers.map(m => ({
       user_id: user.id,
       member_id: m.id,
       month,
@@ -244,6 +277,11 @@ export const PGProvider = ({ children }: { children: ReactNode }) => {
     setPayments(prev => prev.map(p => p.id === paymentId ? { ...p, paid: true } : p));
   };
 
+  const togglePaymentStatus = async (paymentId: string, newStatus: boolean) => {
+    await supabase.from("payments").update({ paid: newStatus }).eq("id", paymentId);
+    setPayments(prev => prev.map(p => p.id === paymentId ? { ...p, paid: newStatus } : p));
+  };
+
   const getRoomByMemberId = (memberId: string) => {
     const member = members.find(m => m.id === memberId);
     return member ? rooms.find(r => r.id === member.roomId) : undefined;
@@ -258,7 +296,7 @@ export const PGProvider = ({ children }: { children: ReactNode }) => {
       rooms, members, payments, expenses, loading,
       addRoom, updateRoom, deleteRoom,
       addMember, updateMember, deleteMember,
-      addPayment, generateMonthPayments, addExpense, updateExpense, deleteExpense, markAsPaid,
+      addPayment, generateMonthPayments, addExpense, updateExpense, deleteExpense, markAsPaid, togglePaymentStatus,
       getRoomByMemberId, getMemberById, getPaymentByMemberId,
       getMembersByRoomId, getPaymentsByMemberId,
     }}>

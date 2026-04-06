@@ -1,16 +1,26 @@
 import { useState } from "react";
 import { usePG } from "@/context/PGContext";
 import { PageHeader } from "@/components/PageHeader";
-import { Check, MessageCircle, Search, CalendarPlus, ChevronDown } from "lucide-react";
+import { Check, X, MessageCircle, Search, CalendarPlus } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 
 type Filter = "all" | "paid" | "unpaid";
 
 const generateMonthList = () => {
   const months: string[] = [];
-  const start = new Date(2026, 0, 1); // January 2026
+  const start = new Date(2026, 0, 1);
   const now = new Date();
   const end = new Date(now.getFullYear(), now.getMonth() + 6, 1);
   let d = new Date(start);
@@ -22,8 +32,22 @@ const generateMonthList = () => {
 };
 const MONTHS = generateMonthList();
 
+const parseMonthString = (monthStr: string): Date => {
+  const parts = monthStr.split(" ");
+  const monthNames = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+  const monthIndex = monthNames.indexOf(parts[0]);
+  return new Date(parseInt(parts[1]), monthIndex, 1);
+};
+
+const isMemberJoinedByMonth = (joinDate: string, monthStr: string): boolean => {
+  const monthStart = parseMonthString(monthStr);
+  const lastDayOfMonth = new Date(monthStart.getFullYear(), monthStart.getMonth() + 1, 0);
+  const joined = new Date(joinDate);
+  return joined <= lastDayOfMonth;
+};
+
 const Payments = () => {
-  const { payments, members, markAsPaid, generateMonthPayments } = usePG();
+  const { payments, members, togglePaymentStatus, generateMonthPayments } = usePG();
   const [filter, setFilter] = useState<Filter>("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedMonth, setSelectedMonth] = useState(() => {
@@ -31,8 +55,12 @@ const Payments = () => {
     return now.toLocaleString("en-US", { month: "long", year: "numeric" });
   });
   const [generating, setGenerating] = useState(false);
+  const [confirmPayment, setConfirmPayment] = useState<{ id: string; name: string; newStatus: boolean } | null>(null);
 
-  const monthPayments = payments.filter(p => p.month === selectedMonth);
+  const eligibleMemberIds = new Set(
+    members.filter(m => isMemberJoinedByMonth(m.joinDate, selectedMonth)).map(m => m.id)
+  );
+  const monthPayments = payments.filter(p => p.month === selectedMonth && eligibleMemberIds.has(p.memberId));
 
   const filtered = monthPayments.filter(p => {
     const member = members.find(m => m.id === p.memberId);
@@ -60,6 +88,13 @@ const Payments = () => {
     }
   };
 
+  const handleToggleConfirm = async () => {
+    if (!confirmPayment) return;
+    await togglePaymentStatus(confirmPayment.id, confirmPayment.newStatus);
+    toast.success(confirmPayment.newStatus ? "Payment marked as paid." : "Payment marked as unpaid.");
+    setConfirmPayment(null);
+  };
+
   const sendWhatsApp = (name: string, phone: string) => {
     const msg = encodeURIComponent(`Hi ${name}, your PG rent for ${selectedMonth} is pending. Please pay as soon as possible. Thank you.`);
     window.open(`https://wa.me/91${phone}?text=${msg}`, "_blank");
@@ -69,7 +104,6 @@ const Payments = () => {
     <div className="p-4 pb-24 max-w-4xl mx-auto">
       <PageHeader title="Payments" subtitle={selectedMonth} />
 
-      {/* Month selector + Generate */}
       <div className="flex flex-col sm:flex-row gap-2 mb-4">
         <Select value={selectedMonth} onValueChange={setSelectedMonth}>
           <SelectTrigger className="h-11 flex-1">
@@ -91,7 +125,6 @@ const Payments = () => {
         </button>
       </div>
 
-      {/* Search */}
       <div className="relative mb-3">
         <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
         <Input value={searchQuery} onChange={e => setSearchQuery(e.target.value)} placeholder="Search by member name..." className="pl-10 h-11" />
@@ -130,16 +163,28 @@ const Payments = () => {
               </div>
               <p className="text-sm text-muted-foreground mb-3">{payment.month} • ₹{payment.amount.toLocaleString("en-IN")}</p>
 
-              {!payment.paid && (
-                <div className="flex gap-2">
-                  <button onClick={() => markAsPaid(payment.id)} className="flex-1 flex items-center justify-center gap-1.5 bg-success text-success-foreground rounded-lg py-2.5 text-sm font-medium active:scale-95 transition-transform">
-                    <Check size={16} /> Mark Paid
+              <div className="flex items-center gap-2">
+                {payment.paid ? (
+                  <button
+                    onClick={() => setConfirmPayment({ id: payment.id, name: member.name, newStatus: false })}
+                    className="inline-flex items-center gap-1 border border-destructive/50 text-destructive rounded-md px-3 py-1.5 text-xs font-medium hover:bg-destructive/10 active:scale-95 transition-all"
+                  >
+                    <X size={14} /> Undo Payment
                   </button>
-                  <button onClick={() => sendWhatsApp(member.name, member.phone)} className="flex-1 flex items-center justify-center gap-1.5 bg-secondary text-secondary-foreground rounded-lg py-2.5 text-sm font-medium active:scale-95 transition-transform">
-                    <MessageCircle size={16} /> Remind
-                  </button>
-                </div>
-              )}
+                ) : (
+                  <>
+                    <button
+                      onClick={() => setConfirmPayment({ id: payment.id, name: member.name, newStatus: true })}
+                      className="flex-1 flex items-center justify-center gap-1.5 bg-success text-success-foreground rounded-lg py-2.5 text-sm font-medium active:scale-95 transition-transform"
+                    >
+                      <Check size={16} /> Mark Paid
+                    </button>
+                    <button onClick={() => sendWhatsApp(member.name, member.phone)} className="flex-1 flex items-center justify-center gap-1.5 bg-secondary text-secondary-foreground rounded-lg py-2.5 text-sm font-medium active:scale-95 transition-transform">
+                      <MessageCircle size={16} /> Remind
+                    </button>
+                  </>
+                )}
+              </div>
             </div>
           );
         })}
@@ -152,6 +197,23 @@ const Payments = () => {
           )}
         </div>
       )}
+
+      <AlertDialog open={!!confirmPayment} onOpenChange={(open) => !open && setConfirmPayment(null)}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Confirm Payment Status</AlertDialogTitle>
+            <AlertDialogDescription>
+              {confirmPayment?.newStatus
+                ? `Are you sure you want to mark ${confirmPayment?.name}'s payment as paid?`
+                : `Are you sure you want to mark ${confirmPayment?.name}'s payment as unpaid?`}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={handleToggleConfirm}>Confirm</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 };
